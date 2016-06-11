@@ -139,11 +139,178 @@ volatile的规则要求一个线程对volatile变量的use/assign操作都会触
 
 ## 8.10 例子：交换函数的多种可能性
 
+考虑一个Sample类，类中有变量a,b，函数hither和yon，定义如下
+
+```
+class Sample {
+    int a = 1, b = 2;
+    void hither() {
+    	a = b;
+    }
+    void yon() 
+    	b = a;
+    }
+}
+```
+
+现在假设有两个线程被创建，一个线程调用hither，另一个线程调用yon。思考以下两个问题，这两个函数的对应操作集合是什么呢？这些操作执行的顺序有什么限制么？
+
+首先我们考虑调用hither的线程。根据上面提到的规则限制，这个线程一定会对b执行use操作，并且后续会对a执行assign操作。这是执行hither函数的最基本操作。
+
+更进一步，线程对变量b的第一个操作不可能是use，应该是assign或者load。assign是不可能的，因为hither函数代码不会执行assign命令，因此在对b的use之前，会对b执行load操作，那么在load之前，还会再追加read操作。
+
+在对a执行assign后，后续的store操作实际上是可选的，可能会同步回主存，也可能不会。如果我们的程序会进行同步写回，那么在store之后还会追加一个对a的write操作。
+
+对于另一个执行yon的线程来讲，这两个线程的执行上下文是相似的，只是变量a和b互换了一下而已。那么这两个函数的对应操作集合列举如下
+
+![GitHub set up](http://docs.oracle.com/javase/specs/jvms/se6/html/Threads.doc.anc.gif)
+
+图中的箭头从A指向B，表示操作A先于操作B发生
+
+对于主存而言，这些操作执行的顺序可能有哪些组合呢？这里唯一的限制是，对变量a的write操作不可能先于read，对变量b的write操作不可能先于read，这样才能保证上面的因果关系箭头不会形成一个闭环。如果存在闭环，那么隐含的语义是一个操作需要先于自己发生，这是不可能的。另外，假设线程的store和write操作需要发生，下面是主存可能的三种逻辑执行顺序。我们定义ha/hb表示执行hither线程的栈区变量a和b的值，ya/yb表示执行yon的线程，ma/mb主存中变量a/b的值。初始时，`ma = 1, mb = 2`。那么三种可能的执行顺序以及他们最终的结果值总结如下
+
+* `write a -> read a, read b -> write b (then ha=2, hb=2, ma=2, mb=2, ya=2, yb=2)`
+* `read a -> write a, write b -> read b (then ha=1, hb=1, ma=1, mb=1, ya=1, yb=1)`
+* `read a -> write a, read b -> write b (then ha=2, hb=2, ma=2, mb=1, ya=1, yb=1)`
+
+因此，在主存中最后的可能结果是a拷贝到b，或者b拷贝到a，或者a和b的值互换；另一方面，线程栈区的变量值与主存中的值可能相等，也可能不相等。我们不能假设并断言某一种结果比另外的结果更可能发生，因为这个程序两个线程执行后的结果，仅和时间相关。
+
+当然，其他的虚拟机实现版本可能选择不会给函数追加store和write操作，或者只追加store和write两者之一，那么分析结果也会有所不同，这里不再继续赘述。
+
+现在假设我们将上面的函数修改为同步的版本
+
+```
+class SynchSample {
+    int a = 1, b = 2;
+    synchronized void hither() {
+    	a = b;
+    }
+    synchronized void yon() 
+    	b = a;
+    }
+}
+```
+
+让我们再一次考虑执行hither函数的线程。根据上面提到的规则限制，在线程执行hither函数之前，一定会执行lock操作(操作目标是SynchSample类的对象实例)。后续的操作是对b的use和对a的assign。最后，在函数执行完hither之后，会对同一个SynchSample类对象执行unlock操作。以上是线程执行hither函数的最基本操作步骤。
+
+在此之前，需要对b执行load，根据规则，在load之前，主存需要对b执行read。因为load发生在lock之后，与load对应的read也同样需要发生在lock之后。
+
+因为对a的assign之后有unlock操作，那么对a的store操作是强制需要的，作为结果，对a的write操作也是必要的。并且，对a的write操作必须发生在unlock之前。
+
+对于另一个执行yon的线程来讲，这两个线程的执行上下文是相似的，只是变量a和b互换了一下而已。那么这两个函数的对应操作集合列举如下
+
+![GitHub set up](http://docs.oracle.com/javase/specs/jvms/se6/html/Threads.doc.anc1.gif)
+
+lock和unlock对主存的操作执行顺序提出了更进一步的限制。一个线程的lock操作，不能发生在另一个线程的lock和unlock之间。更进一步，与上面非同步的代码版本不同，unlock操作要求store和write是必须的，因此也去掉了中框号可选标示。同步版本，只有两个可能的发生序列
+
+* `write a -> read a, read b -> write b (then ha=2, hb=2, ma=2, mb=2, ya=2, yb=2)`
+* `read a -> write a, write b -> read b (then ha=1, hb=1, ma=1, mb=1, ya=1, yb=1)`
+
+结果具体是这两个序列的哪一个只与他们的发生时间有关，此外，我们可以看到，不管是两者中的哪一个，两个线程栈区的变量值都最终和主存达成了一致。
+
 ## 8.11 例子：乱序写
+
+这一节的例子与上一节的例子是类似的，只是函数变成了一个重新设置变量的函数和一个只读取两个变量的函数。函数定义如下
+
+```
+class Simple {
+    int a = 1, b = 2;
+    void to() {
+    	a = 3;
+    	b = 4;
+    }
+    void fro() 
+    	System.out.println("a= " + a + ", b=" + b);
+    }
+}
+```
+
+现在假设有两个线程被创建，一个线程调用to，另一个线程调用fro。思考以下两个问题，这两个函数的对应操作集合是什么呢？这些操作执行的顺序有什么限制么？
+
+让我们考虑一个调用to函数的线程。根据上面提到的规则限制，这个线程必须对a执行assign，随后对b执行assign。这是调用to函数的最基本操作。因为函数没有同步，因此对于一个虚拟机的实现版本而言，是否后续追加store操作来写回主存是没有要求的。因此，对于调用fro函数的线程，a和b的结果值没有相关性，a的值可能是1或者3，b的值可能是2或者4。
+
+现在我们保持fro不变，对to增加同步
+
+```
+class SynchSimple {
+    int a = 1, b = 2;
+    synchronized void to() {
+    	a = 3;
+    	b = 4;
+    }
+    void fro() 
+    	System.out.println("a= " + a + ", b=" + b);
+    }
+}
+```
+
+在这种情形下，函数to在执行unlock之前，将会调用store强制将assigned变量写回主存。
+
+函数fro需要从主存load变量a,b，并且随后use变量a和b(先a后b的顺序)。
+
+可能的操作集合如下
+
+![GitHub set up](http://docs.oracle.com/javase/specs/jvms/se6/html/Threads.doc.anc2.gif)
+
+对主存而言，这些操作的可能发生顺序是什么？注意，并没有规则要求对a的write要先于对b的write，也不要求对a的read要先于对b的read。另外，由于函数to同步，fro不同步，所以我们不能防止read操作发生在lock和unlock之间。(所以，这里的关键点是，即使我们将一个函数声明为synchronized，也不能保证这个函数的执行时原子的，就执行序列而言，非同步的函数操作也可能发生在lock和unlock之间)
+
+作为结果，fro函数执行后，a可能是1或者3，b可能是2或者4。因此，fro函数观测到`a=1, b=4`也是可能的。也就是说，虽然to函数先执行了对a的assign，然后是对b的assign，但是对应的store函数顺序是不确定的，其他的线程观测到的store操作顺序可能是先b后a，从而导致了结果`a=1, b=4`。
+
+最后，假设to和fro都是同步的
+
+```
+class SynchSynchSimple {
+    int a = 1, b = 2;
+    synchronized void to() {
+    	a = 3;
+    	b = 4;
+    }
+    synchronized void fro() 
+    	System.out.println("a=" + a + ", b=" + b);
+    }
+}
+```
+
+在这种情况下，fro函数的操作不会和to函数的操作交织在一起，所以fro只会打印`a=1, b=2`或者`a=3, b=4`
 
 ## 8.12 线程
 
+线程是通过类Thread、ThreadGroup来创建和管理的。创建一个Thread对象从而创建了一个线程，并且这也是唯一的创建线程的方式。当一个线程被创建后，这个线程此时并不处在活跃的运行状态。线程只有在调用了start方法后，才会开始运行。
+
 ## 8.13 锁和同步
 
-## 8.14 等待集，通知
+每一个对象都有一个锁与之关联。Java编程语言并没有提供专门的指令来实现上文提到的lock和unlock操作，而是使用一种潜在的高级别构造形式来实现lock/unlock元语(与之对应的，Java虚拟机提供*monitorenter*和*monitorexit*指令来实现lock/unlock)
+
+synchronized关键字能引用到一个对象，并尝试对这个对象进行lock加锁，并且在lock操作成功完成之前，都不会执行后面的指令，此时线程是阻塞的。通常，对于通过synchronized关键词进行同步保护的代码片段，不论是正常执行完，还是发生了异常，Java语言的编译器能够保证以下的执行顺序 `lock(monitorenter) -> statement body -> unlock(monitorexit)`
+
+synchronized函数在被唤醒(invoke)时能够执行lock操作，只有在lock成功之后，才会执行这个函数体。如果这个函数是对象内部函数，synchronized锁的是函数所在对象关联的锁，即Object Instance(加锁的对象一般我们也称为关键字*this*)。如果这个方法是静态(static)的，那么synchronized锁的则是class对象。无论是哪一种，无论是正常执行完还是发生了异常，与lock对应的unlock操作都会在函数执行完毕时被执行，从而释放锁。
+
+最好的实践是，如果某个线程曾对一个对象执行过assign，并且其他线程也曾对这个对象执行过use/assign，那么所有访问这个对象的函数和代码段都应该使用synchronized来进行同步保护。
+
+虽然Java编译器保证了lock/unlock的正确使用，但是并非所有提交给JVM的代码都能够做到这一点(比如有人直接写机器级代码...)，所以JVM的实现版本**不**强制要求满足以下两个规则
+
+* 不管函数是正常结束，还是发生了异常。在程序的执行过程中，所有对L的lock操作数，必须和对L的unlock数相等。
+* 函数中不能存在这样一个点P，从函数开始到P中所有对L的unlock操作数多于从函数开始到P中所有对L的lock操作数。
+
+上面的规则用非正式的语言描述就是，在函数中，对L的所有unlock都能在前面找到一个唯一对L的lock与之匹配。
+
+注意，在执行一个synchronized函数时，JVM自动lock/unlock操作只发生在函数的执行过程中。
+
+## 8.14 线程等待集合，通知
+
+每一个对象，除了有一个锁与之关联，还有一个线程等待集合(a wait set of threads)与之关联。当一个对象被创建之后，这个线程等待集合是空的。
+
+线程等待集合是为对象的`wait, notify, notifyAll`这三个函数服务的。这些函数与线程的调度机制相关。
+
+对于线程T来讲，只有当T获得了对象的锁之后，才可以调用这个对象的`wait`函数。现在假设T已经对某个对象执行了N次lock操作(这里的N此lock操作是指那些没有被unlock抵消掉的，当前正在生效的lock操作)。如果此时调用这个对象的`wait`，那么就会把当前线程T加入这个对象的线程等待集合中，取消掉这个线程的被CPU调度资格，然后执行N次unlock操作从而释放这个对象。这里的N次unlock并不像synchronized结束时的unlock那样真的要去释放锁，其目的是因为当前某个条件不满足而不得不去等待这个条件发生，所以这才释放锁，当条件满足时，这些锁将会被重新全部加上。线程T将保持这种休眠的状态，直到下面事件中任意一个发生
+
+* 其他线程调用了这个对象的`notify`，此时会随机选择这个对象的线程等待集合中的某一个线程来唤醒，线程T碰巧被选中了。
+* 其他线程调用了这个对象的`notifyAll`，此时这个对象的线程等待集合中所有线程都被唤醒，都进入可以被CPU调度的状态，一个线程将通过竞争获得锁从而获得了执行的权力，其他的线程则进入阻塞状态。注意这里的阻塞状态与wait时的等待并不同，wait有一个等待集合来容纳这些线程，相当于有一个休息室，这些线程正在里面休息。而阻塞的线程都在努力争取可能会被释放的锁，他们并不在等待集合休息室中休息。
+* 如果线程T在调用`wait`时声明了等待的时间，当确实已经逝去了这些事件后，线程T将会离开线程等待集合，并尝试获得这个对象的锁。
+
+在上面三个事件任意一个发生之后，线程T将会从对象的线程等待集合中移除，并且重新获得被CPU调度的权力。T将重新和其他线程像平常那样尝试获得对象的锁，一旦成功获得对象的锁，T将对这个对象再执行N-1次lock操作(获得对象锁的时候，加了一次锁，这里再执行N-1次，从而实现对这个对象加锁N次，这样保证了和之前wait时的上下文相同)，然后程序执行重新指向了之前程序wait操作的下一条指令。
+
+只有当当前线程T获得了某个对象的锁，才可以调用这个对象的`notify`函数，否则将会抛出IllegalMonitorStateException异常。调用`notify`之后，如果这个对象的线程等待集合不空，那么就会随机挑选一个线程，从集合中移除，使之重新获得被调度资格。值得一提的是，这个重新获得调度权的线程并不会立刻被调度，它需要等当前线程T执行完`notify`之后所有在加锁区域的指令，然后T释放锁，再然后这个线程才会有机会真正被调度。
+
+只有当当前线程T获得了某个对象的锁，才可以调用这个对象的`notifyAll`函数，否则将会抛出IllegalMonitorStateException异常。调用`notifyAll`之后，所有这个对象的线程等待集合中的线程都会被移除，并去竞争获得对象锁，当然以上的去竞争锁需要等到线程T执行完notifyAll之后所有在同步区代码并释放锁之后方可。
 
